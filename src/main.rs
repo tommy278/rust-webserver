@@ -4,6 +4,11 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, mpsc::channel};
 use std::thread;
 
+struct HeaderDetails<'a> {
+    route: &'a str,
+    method: &'a str,
+}
+
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:8080").unwrap();
     let (tx, rx) = channel::<TcpStream>();
@@ -26,10 +31,45 @@ fn main() {
 }
 
 fn handle_connection(mut stream: TcpStream) {
-    std::thread::sleep(std::time::Duration::from_secs(3));
     let reader = BufReader::new(&stream);
-    let request_header = reader.lines().next().unwrap().unwrap();
 
+    let headers: Vec<String> = reader
+        .lines()
+        .map(|l| l.unwrap())
+        .take_while(|l| !l.is_empty())
+        .collect();
+
+    let request_header = headers.iter().nth(0).unwrap();
+
+    let doc_type = headers
+        .iter()
+        .find(|l| l.starts_with("Accept: "))
+        .map(|l| &l[13..17]);
+
+    let HeaderDetails { route, method } = get_header_details(request_header);
+
+    let doc_type = parse_doctype(doc_type.unwrap());
+
+    if method == "GET" {
+        handle_get_request(&mut stream, route, doc_type);
+    }
+}
+
+fn parse_doctype(doc_type: &str) -> &'static str {
+    if doc_type.starts_with("css") {
+        return "css";
+    } else if doc_type.starts_with("js") {
+        return "js";
+    } else if doc_type.starts_with("html") {
+        return "html";
+    }
+    // Return to default HTML for now
+    else {
+        return "html";
+    }
+}
+
+fn get_header_details(request_header: &str) -> HeaderDetails<'_> {
     let split_header: Vec<&str> = request_header.split_whitespace().collect();
 
     let mut v_iter = split_header.into_iter();
@@ -37,31 +77,41 @@ fn handle_connection(mut stream: TcpStream) {
     let method = v_iter.next().unwrap();
     let route = v_iter.next().unwrap();
 
-    if method == "GET" {
-        let absolute_route = match route {
-            "/" => format!("static/index.html"),
-            _ => format!("static{route}.html"),
-        };
+    HeaderDetails { route, method }
+}
 
-        let mut buf = String::new();
-        let status_header: &str;
-        let length: usize;
+fn handle_get_request(stream: &mut TcpStream, route: &str, doc_type: &str) {
+    let doc_type = parse_doctype(doc_type);
 
-        if let Ok(mut file) = File::open(absolute_route) {
-            file.read_to_string(&mut buf).unwrap();
-            length = buf.len();
-            status_header = "HTTP/1.1 200 OK";
-        } else {
-            let mut file = File::open("static/not-found.html").unwrap();
-            file.read_to_string(&mut buf).unwrap();
-            length = buf.len();
-            status_header = "HTTP/1.1 404 Not Found";
+    let absolute_route = match route {
+        "/" => format!("static/index.html"),
+        _ => {
+            // Slicing the route for cleaner formatting
+            let route = &route[1..];
+            format!("static/{route}.{doc_type}")
         }
+    };
 
-        let response = format!(
-            "{status_header}\r\nContent-Type: text/html\r\nContent-Length: {length}\r\n\r\n{buf}"
-        );
+    println!("{}", absolute_route);
 
-        stream.write_all(response.as_bytes()).unwrap();
+    let mut buf = String::new();
+    let status_header: &str;
+    let length: usize;
+
+    if let Ok(mut file) = File::open(absolute_route) {
+        file.read_to_string(&mut buf).unwrap();
+        length = buf.len();
+        status_header = "HTTP/1.1 200 OK";
+    } else {
+        let mut file = File::open("static/not-found.html").unwrap();
+        file.read_to_string(&mut buf).unwrap();
+        length = buf.len();
+        status_header = "HTTP/1.1 404 Not Found";
     }
+
+    let response = format!(
+        "{status_header}\r\nContent-Type: text/html\r\nContent-Length: {length}\r\n\r\n{buf}"
+    );
+
+    stream.write_all(response.as_bytes()).unwrap();
 }
