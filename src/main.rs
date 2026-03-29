@@ -1,4 +1,4 @@
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{BufReader, prelude::*};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, mpsc::channel};
@@ -31,16 +31,14 @@ enum DocType {
 }
 
 impl DocType {
-    fn parse_doctype(doc_type: &str) -> DocType {
-        if doc_type.starts_with("css") {
+    fn parse_ext(route: &str) -> DocType {
+        if route.ends_with(".css") {
             return DocType::CSS;
-        } else if doc_type.starts_with("js") {
+        } else if route.ends_with(".js") {
             return DocType::JS;
-        } else if doc_type.starts_with("html") {
+        } else if (route.starts_with("/") && !route.contains(".")) || route.ends_with("/") {
             return DocType::HTML;
-        }
-        // Return to default HTML for now
-        else {
+        } else {
             return DocType::OTHER;
         }
     }
@@ -78,52 +76,21 @@ fn handle_connection(mut stream: TcpStream) {
 
     let request_header = headers.iter().nth(0).unwrap();
 
-    let doc_type = parse_ext(&headers);
-    println!("{:?}", doc_type);
-
     let HeaderDetails { route, method } = HeaderDetails::get_header_details(request_header);
 
-    println!("{:?}", doc_type);
+    let doc_type = DocType::parse_ext(&route);
 
     if method == "GET" {
         handle_get_request(&mut stream, route, doc_type);
     }
 }
 
-fn parse_ext(headers: &Vec<String>) -> DocType {
-    let doc_type = headers
-        .iter()
-        .find(|l| l.starts_with("Accept: "))
-        .map(|l| &l[8..])
-        .unwrap();
-
-    println!("Here:{}", doc_type);
-    if doc_type.starts_with("*/*") {
-        return DocType::OTHER;
-    } else {
-        let doc_type = &doc_type[5..9];
-
-        println!("bottom {}", doc_type);
-
-        if doc_type.starts_with("html") {
-            return DocType::HTML;
-        } else if doc_type.starts_with("css") {
-            return DocType::CSS;
-        } else if doc_type.starts_with("js") {
-            return DocType::JS;
-        } else {
-            return DocType::OTHER;
-        }
-    }
-}
-
 fn handle_get_request(stream: &mut TcpStream, route: &str, doc_type: DocType) {
     let absolute_route = match route {
-        "/" => format!("static/index.html"),
+        "/" => "static/index.html".to_string(),
         _ => {
             // Slicing the route for cleaner formatting
             let route = &route[1..];
-            println!("This is the route {}", route);
             match doc_type {
                 DocType::HTML => format!("static/{route}.html"),
                 DocType::JS | DocType::CSS | DocType::OTHER => route.to_string(),
@@ -131,11 +98,26 @@ fn handle_get_request(stream: &mut TcpStream, route: &str, doc_type: DocType) {
         }
     };
 
-    println!("{}", absolute_route);
+    let is_safe = absolute_route.starts_with("static/")
+        || absolute_route.starts_with("styles/")
+        || absolute_route.starts_with("scripts/");
+
+    if !is_safe {
+        let err = "HTTP/1.1 403 Forbidden\r\n\r\n".to_string();
+        stream.write_all(err.as_bytes()).unwrap();
+        return;
+    }
 
     let mut buf = String::new();
     let status_header: &str;
     let length: usize;
+
+    let content_type = match doc_type {
+        DocType::CSS => "text/css",
+        DocType::HTML => "text/html",
+        DocType::JS => "text/javascript",
+        DocType::OTHER => "application/octet-stream",
+    };
 
     if let Ok(mut file) = File::open(absolute_route) {
         file.read_to_string(&mut buf).unwrap();
@@ -149,7 +131,7 @@ fn handle_get_request(stream: &mut TcpStream, route: &str, doc_type: DocType) {
     }
 
     let response = format!(
-        "{status_header}\r\nContent-Type: text/html\r\nContent-Length: {length}\r\n\r\n{buf}"
+        "{status_header}\r\nContent-Type: {content_type}\r\nContent-Length: {length}\r\n\r\n{buf}"
     );
 
     stream.write_all(response.as_bytes()).unwrap();
