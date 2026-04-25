@@ -1,3 +1,5 @@
+mod template;
+
 use std::fs::File;
 use std::io::{BufReader, prelude::*};
 use std::net::{TcpListener, TcpStream};
