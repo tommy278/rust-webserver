@@ -1,8 +1,11 @@
 mod template;
 
+use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufReader, prelude::*};
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
 use std::sync::{Arc, Mutex, mpsc::channel};
 use std::thread;
 
@@ -46,28 +49,41 @@ impl DocType {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct Person {
+    id: i32,
+    name: String,
+}
+
+struct ThreadData {
+    stream: TcpStream,
+    connection: Connection,
+}
+
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:8080").unwrap();
-    let (tx, rx) = channel::<TcpStream>();
+    let (tx, rx) = channel::<ThreadData>();
     let reciever = Arc::new(Mutex::new(rx));
 
     for _ in 0..4 {
         let reciever = reciever.clone();
         thread::spawn(move || {
             loop {
-                let stream = reciever.lock().unwrap().recv().unwrap();
-                handle_connection(stream);
+                let data = reciever.lock().unwrap().recv().unwrap();
+                handle_connection(data.stream, &data.connection);
             }
         });
     }
 
     for stream in listener.incoming() {
         let stream = stream.unwrap();
-        tx.send(stream).unwrap();
+        let path = Path::new("api/store.db3");
+        let connection = Connection::open(path).unwrap();
+        tx.send(ThreadData { stream, connection }).unwrap();
     }
 }
 
-fn handle_connection(mut stream: TcpStream) {
+fn handle_connection(mut stream: TcpStream, connection: &Connection) {
     let reader = BufReader::new(&stream);
 
     let headers: Vec<String> = reader
@@ -83,11 +99,16 @@ fn handle_connection(mut stream: TcpStream) {
     let doc_type = DocType::parse_ext(&route);
 
     if method == "GET" {
-        handle_get_request(&mut stream, route, doc_type);
+        handle_get_request(&mut stream, route, doc_type, connection);
     }
 }
 
-fn handle_get_request(stream: &mut TcpStream, route: &str, doc_type: DocType) {
+fn handle_get_request(
+    stream: &mut TcpStream,
+    route: &str,
+    doc_type: DocType,
+    connection: &Connection,
+) {
     let absolute_route = match route {
         "/" => "static/index.html".to_string(),
         _ => {
@@ -102,11 +123,51 @@ fn handle_get_request(stream: &mut TcpStream, route: &str, doc_type: DocType) {
 
     let is_safe = absolute_route.starts_with("static/")
         || absolute_route.starts_with("styles/")
-        || absolute_route.starts_with("scripts/");
+        || absolute_route.starts_with("scripts/")
+        || absolute_route.starts_with("api/");
 
     if !is_safe {
         let err = "HTTP/1.1 403 Forbidden\r\n\r\n".to_string();
         stream.write_all(err.as_bytes()).unwrap();
+        return;
+    }
+
+    if absolute_route.starts_with("api") {
+        let mut stmt = connection.prepare("SELECT id, name FROM persons").unwrap();
+        let raw_rows = stmt
+            .query_map([], |row| {
+                Ok(Person {
+                    id: row.get_unwrap(0),
+                    name: row.get_unwrap(1),
+                })
+            })
+            .unwrap();
+
+        let mut rows: Vec<serde_json::Value> = Vec::with_capacity(20);
+
+        for person in raw_rows {
+            match person {
+                Ok(person) => rows.push(serde_json::json!(
+                    {
+                        "id": person.id,
+                        "name": person.name
+                    }
+                )),
+                Err(e) => eprintln!("{:?}", e),
+            }
+        }
+
+        let rows_json = serde_json::json!(rows).to_string();
+
+        let status_header = "HTTP/1.1 200 OK";
+        let content_type = "application/json";
+        let content_length = rows_json.len();
+
+        let response = format!(
+            "{status_header}\r\nContent-Type: {content_type}\r\nContent-Length: {content_length}\r\n\r\n{rows_json}"
+        );
+
+        stream.write_all(response.as_bytes()).unwrap();
         return;
     }
 
