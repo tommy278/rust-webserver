@@ -32,6 +32,7 @@ enum DocType {
     CSS,
     JS,
     HTML,
+    API,
     OTHER,
 }
 
@@ -41,6 +42,8 @@ impl DocType {
             return DocType::CSS;
         } else if route.ends_with(".js") {
             return DocType::JS;
+        } else if route.starts_with("/api") {
+            return DocType::API;
         } else if (route.starts_with("/") && !route.contains(".")) || route.ends_with("/") {
             return DocType::HTML;
         } else {
@@ -116,7 +119,7 @@ fn handle_get_request(
             let route = &route[1..];
             match doc_type {
                 DocType::HTML => format!("static/{route}.html"),
-                DocType::JS | DocType::CSS | DocType::OTHER => route.to_string(),
+                DocType::API | DocType::JS | DocType::CSS | DocType::OTHER => route.to_string(),
             }
         }
     };
@@ -127,7 +130,7 @@ fn handle_get_request(
         || absolute_route.starts_with("api/");
 
     if !is_safe {
-        let err = "HTTP/1.1 403 Forbidden\r\n\r\n".to_string();
+        let err = "HTTP/1.1 403 Forbidden\r\n\r\n";
         stream.write_all(err.as_bytes()).unwrap();
         return;
     }
@@ -180,6 +183,7 @@ fn handle_get_request(
         DocType::HTML => "text/html",
         DocType::JS => "text/javascript",
         DocType::OTHER => "application/octet-stream",
+        DocType::API => unreachable!(),
     };
 
     if let Ok(mut file) = File::open(absolute_route) {
