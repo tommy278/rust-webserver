@@ -1,7 +1,7 @@
 mod template;
 
 use rusqlite::Connection;
-use serde::{Deserialize, Serialize};
+use rusqlite::types::ValueRef;
 use std::fs::File;
 use std::io::{BufReader, prelude::*};
 use std::net::{TcpListener, TcpStream};
@@ -50,12 +50,6 @@ impl DocType {
             return DocType::OTHER;
         }
     }
-}
-
-#[derive(Serialize, Deserialize)]
-struct Person {
-    id: i32,
-    name: String,
 }
 
 struct ThreadData {
@@ -136,29 +130,34 @@ fn handle_get_request(
     }
 
     if absolute_route.starts_with("api") {
-        let mut stmt = connection.prepare("SELECT id, name FROM persons").unwrap();
-        let raw_rows = stmt
+        let mut stmt = connection.prepare("PRAGMA table_info(persons)").unwrap();
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let mut stmt = connection.prepare("SELECT * FROM persons").unwrap();
+        let rows = stmt
             .query_map([], |row| {
-                Ok(Person {
-                    id: row.get_unwrap(0),
-                    name: row.get_unwrap(1),
-                })
+                let mut obj = serde_json::Map::new();
+                for (i, col) in columns.iter().enumerate() {
+                    let value = match row.get_ref(i).unwrap() {
+                        ValueRef::Null => serde_json::Value::Null,
+                        ValueRef::Integer(i) => serde_json::Value::from(i),
+                        ValueRef::Real(f) => serde_json::Value::from(f),
+                        ValueRef::Text(s) => {
+                            serde_json::Value::from(std::str::from_utf8(s).unwrap_or_default())
+                        }
+                        ValueRef::Blob(b) => serde_json::Value::from(b),
+                    };
+                    obj.insert(col.clone(), value);
+                }
+                Ok(serde_json::Value::Object(obj))
             })
-            .unwrap();
-
-        let mut rows: Vec<serde_json::Value> = Vec::with_capacity(20);
-
-        for person in raw_rows {
-            match person {
-                Ok(person) => rows.push(serde_json::json!(
-                    {
-                        "id": person.id,
-                        "name": person.name
-                    }
-                )),
-                Err(e) => eprintln!("{:?}", e),
-            }
-        }
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>();
 
         let rows_json = serde_json::json!(rows).to_string();
 
