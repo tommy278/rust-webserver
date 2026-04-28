@@ -129,15 +129,24 @@ fn handle_get_request(
         return;
     }
 
+    //  structure like api/* eg api/people or api/games
+
     if absolute_route.starts_with("api") {
-        let mut stmt = connection.prepare("PRAGMA table_info(persons)").unwrap();
+        // Drop the first 4 chars ('api/')
+        let schema_name = &absolute_route[4..];
+
+        let query = format!("PRAGMA table_info({})", schema_name);
+        let mut stmt = connection.prepare(&query).unwrap();
+
         let columns: Vec<String> = stmt
             .query_map([], |row| row.get(1))
             .unwrap()
             .filter_map(|r| r.ok())
             .collect();
 
-        let mut stmt = connection.prepare("SELECT * FROM persons").unwrap();
+        let query = format!("SELECT * FROM {}", schema_name);
+        let mut stmt = connection.prepare(&query).unwrap();
+
         let rows = stmt
             .query_map([], |row| {
                 let mut obj = serde_json::Map::new();
