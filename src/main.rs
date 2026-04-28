@@ -1,7 +1,8 @@
 mod template;
 
-use rusqlite::Connection;
 use rusqlite::types::ValueRef;
+use rusqlite::{Connection, ToSql, params_from_iter};
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufReader, prelude::*};
 use std::net::{TcpListener, TcpStream};
@@ -9,9 +10,29 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, mpsc::channel};
 use std::thread;
 
+enum Method {
+    POST,
+    GET,
+    PUT,
+    DELETE,
+}
+
+impl Method {
+    fn new(string: &str) -> Self {
+        match string {
+            "POST" => Method::POST,
+            "GET" => Method::GET,
+            "PUT" => Method::PUT,
+            "DELETE" => Method::DELETE,
+            // TODO: Add better error handling
+            _ => panic!("Method not found"),
+        }
+    }
+}
+
 struct HeaderDetails<'a> {
     route: &'a str,
-    method: &'a str,
+    method: Method,
 }
 
 impl HeaderDetails<'_> {
@@ -22,6 +43,8 @@ impl HeaderDetails<'_> {
 
         let method = v_iter.next().unwrap();
         let route = v_iter.next().unwrap();
+
+        let method = Method::new(method);
 
         HeaderDetails { route, method }
     }
@@ -81,10 +104,10 @@ fn main() {
 }
 
 fn handle_connection(mut stream: TcpStream, connection: &Connection) {
-    let reader = BufReader::new(&stream);
+    let mut reader = BufReader::new(&stream);
 
-    let headers: Vec<String> = reader
-        .lines()
+    let lines = (&mut reader).lines();
+    let headers: Vec<String> = lines
         .map(|l| l.unwrap())
         .take_while(|l| !l.is_empty())
         .collect();
@@ -95,10 +118,86 @@ fn handle_connection(mut stream: TcpStream, connection: &Connection) {
 
     let doc_type = DocType::parse_ext(&route);
 
-    if method == "GET" {
-        handle_get_request(&mut stream, route, doc_type, connection);
+    match method {
+        Method::GET => handle_get_request(&mut stream, route, doc_type, connection),
+        Method::POST => {
+            let content_length = headers
+                .iter()
+                .find(|c| c.to_lowercase().starts_with("content-length:"))
+                .and_then(|c| c.split_once(':'))
+                .map(|(_, value)| value.trim().parse::<usize>().unwrap_or_default())
+                .unwrap();
+
+            let mut body_buffer = vec![0; content_length];
+            reader.read_exact(&mut body_buffer).unwrap();
+
+            let body: String = String::from_utf8(body_buffer).unwrap();
+
+            handle_post_request(&body, &mut stream, route, connection)
+        }
+        _ => todo!(),
     }
 }
+
+// Handle POST CREATE ENTRY OR CREATE TABLE
+
+#[derive(Serialize, Deserialize)]
+struct Response {
+    status: u8,
+    message: String,
+}
+
+fn handle_post_request(body: &str, stream: &mut TcpStream, route: &str, connection: &Connection) {
+    // Remove the beginning char which is / to make the slice idx find accurate
+    let route = &route[1..];
+
+    let slice_idx = route.find("/").unwrap() as usize + 1;
+    let schema = &route[slice_idx..];
+
+    let pairs: Vec<&str> = body.split('&').collect();
+    let mut keys: Vec<&str> = Vec::with_capacity(20);
+    let mut values: Vec<&str> = Vec::with_capacity(20);
+
+    for p in pairs {
+        let pair = p.split_once('=').unwrap();
+        keys.push(pair.0);
+        values.push(pair.1);
+    }
+    // Something like game_id, game_title, ...
+    let value_query = keys.join(",");
+    let place_holder: Vec<String> = (1..=keys.len()).map(|i| format!("?{}", i)).collect();
+
+    let values: Vec<&dyn ToSql> = values.iter().map(|v| v as &dyn ToSql).collect();
+
+    let sql = format!(
+        "INSERT INTO {} ({}) VALUES ({})",
+        schema,
+        value_query,
+        place_holder.join(",")
+    );
+
+    connection.execute(&sql, params_from_iter(values)).unwrap();
+
+    let response = Response {
+        status: 200,
+        message: String::from("Succesfully created"),
+    };
+
+    let res_json = serde_json::to_string(&response).unwrap();
+
+    let status_header = "HTTP/1.1 200 OK";
+    let content_type = "application/json";
+    let content_length = res_json.len();
+
+    let response = format!(
+        "{status_header}\r\nContent-Type: {content_type}\r\nContent-Length: {content_length}\r\n\r\n{res_json}"
+    );
+
+    stream.write_all(response.as_bytes()).unwrap();
+}
+// Handle PUT Simply update entry
+
+// DELETE delete entry or table
 
 fn handle_get_request(
     stream: &mut TcpStream,
