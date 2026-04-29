@@ -75,6 +75,21 @@ impl DocType {
     }
 }
 
+enum Encoding {
+    URL,
+    JSON,
+}
+
+impl From<&str> for Encoding {
+    fn from(value: &str) -> Self {
+        match value {
+            "appplication/x-www-form-urlencoded" => Self::URL,
+            "application/json" => Self::JSON,
+            _ => unreachable!(),
+        }
+    }
+}
+
 struct ThreadData {
     stream: TcpStream,
     connection: Connection,
@@ -128,12 +143,21 @@ fn handle_connection(mut stream: TcpStream, connection: &Connection) {
                 .map(|(_, value)| value.trim().parse::<usize>().unwrap_or_default())
                 .unwrap();
 
+            let content_type = headers
+                .iter()
+                .find(|c| c.to_lowercase().starts_with("content-type:"))
+                .and_then(|c| c.split_once(':'))
+                .map(|(_, value)| value.trim())
+                .unwrap();
+
+            let content_type = Encoding::from(content_type);
+
             let mut body_buffer = vec![0; content_length];
             reader.read_exact(&mut body_buffer).unwrap();
 
             let body: String = String::from_utf8(body_buffer).unwrap();
 
-            handle_post_request(&body, &mut stream, route, connection)
+            handle_post_request(&body, &mut stream, route, connection, content_type)
         }
         _ => todo!(),
     }
@@ -147,21 +171,39 @@ struct Response {
     message: String,
 }
 
-fn handle_post_request(body: &str, stream: &mut TcpStream, route: &str, connection: &Connection) {
+fn handle_post_request(
+    body: &str,
+    stream: &mut TcpStream,
+    route: &str,
+    connection: &Connection,
+    content_type: Encoding,
+) {
     // Remove the beginning char which is / to make the slice idx find accurate
     let route = &route[1..];
 
     let slice_idx = route.find("/").unwrap() as usize + 1;
     let schema = &route[slice_idx..];
 
-    let pairs: Vec<&str> = body.split('&').collect();
-    let mut keys: Vec<&str> = Vec::with_capacity(20);
-    let mut values: Vec<&str> = Vec::with_capacity(20);
+    let mut keys: Vec<String> = Vec::with_capacity(20);
+    let mut values: Vec<String> = Vec::with_capacity(20);
 
-    for p in pairs {
-        let pair = p.split_once('=').unwrap();
-        keys.push(pair.0);
-        values.push(pair.1);
+    match content_type {
+        Encoding::URL => {
+            let pairs: Vec<&str> = body.split('&').collect();
+            for p in pairs {
+                let pair = p.split_once('=').unwrap();
+                keys.push(String::from(pair.0));
+                values.push(String::from(pair.1));
+            }
+        }
+        Encoding::JSON => {
+            let body_json: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let obj = body_json.as_object().unwrap();
+            for (key, value) in obj {
+                keys.push(key.to_string());
+                values.push(value.to_string())
+            }
+        }
     }
     // Something like game_id, game_title, ...
     let value_query = keys.join(",");
