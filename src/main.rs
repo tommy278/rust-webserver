@@ -1,12 +1,13 @@
 mod template;
 
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, ToSql, params_from_iter};
+use rusqlite::{Connection, params_from_iter};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufReader, prelude::*};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex, mpsc::channel};
 use std::thread;
 
@@ -15,6 +16,36 @@ enum Method {
     GET,
     PUT,
     DELETE,
+}
+
+enum Type {
+    INTEGER,
+    TEXT,
+    REAL,
+}
+
+impl Type {
+    fn to_sql(&self, key: &str) -> String {
+        match self {
+            Type::INTEGER => format!("{} INTEGER NOT NULL,", key),
+            Type::REAL => format!("{} REAL NOT NULL,", key),
+            Type::TEXT => format!("{} TEXT NOT NULL,", key),
+        }
+    }
+}
+
+impl FromStr for Type {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.parse::<i64>().is_ok() {
+            Ok(Self::INTEGER)
+        } else if s.parse::<f64>().is_ok() {
+            Ok(Self::REAL)
+        } else {
+            Ok(Self::TEXT)
+        }
+    }
 }
 
 impl Method {
@@ -83,7 +114,7 @@ enum Encoding {
 impl From<&str> for Encoding {
     fn from(value: &str) -> Self {
         match value {
-            "appplication/x-www-form-urlencoded" => Self::URL,
+            "application/x-www-form-urlencoded" => Self::URL,
             "application/json" => Self::JSON,
             _ => unreachable!(),
         }
@@ -205,20 +236,22 @@ fn handle_post_request(
             }
         }
     }
-    // Something like game_id, game_title, ...
-    let value_query = keys.join(",");
-    let place_holder: Vec<String> = (1..=keys.len()).map(|i| format!("?{}", i)).collect();
 
-    let values: Vec<&dyn ToSql> = values.iter().map(|v| v as &dyn ToSql).collect();
-
-    let sql = format!(
-        "INSERT INTO {} ({}) VALUES ({})",
-        schema,
-        value_query,
-        place_holder.join(",")
+    assert_eq!(
+        keys.len(),
+        values.len(),
+        "Something went wrong with parsing"
     );
+    // Something like game_id, game_title, ...
 
-    connection.execute(&sql, params_from_iter(values)).unwrap();
+    if schema.ends_with("create") {
+        handle_create(schema, &keys, &values, connection);
+
+        let (schema, _) = schema.split_once("/").unwrap();
+        handle_insert(schema, &keys, &values, connection);
+    } else {
+        handle_insert(schema, &keys, &values, connection);
+    };
 
     let response = Response {
         status: 200,
@@ -236,6 +269,41 @@ fn handle_post_request(
     );
 
     stream.write_all(response.as_bytes()).unwrap();
+}
+
+fn handle_insert(schema: &str, keys: &Vec<String>, values: &Vec<String>, connection: &Connection) {
+    let value_query = keys.join(",");
+    let place_holder: Vec<String> = (1..=keys.len()).map(|i| format!("?{}", i)).collect();
+
+    // let values: Vec<&dyn ToSql> = values.iter().map(|v| v as &dyn ToSql).collect();
+    let sql = format!(
+        "INSERT INTO {} ({}) VALUES ({})",
+        schema,
+        value_query,
+        place_holder.join(",")
+    );
+
+    connection.execute(&sql, params_from_iter(values)).unwrap();
+}
+
+fn handle_create(schema: &str, keys: &Vec<String>, values: &Vec<String>, connection: &Connection) {
+    let (schema, _) = schema.split_once("/").unwrap();
+
+    let mut sql = format!(
+        "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY,",
+        schema
+    );
+
+    for i in 0..keys.len() {
+        let db_type = Type::from_str(&values[i]).unwrap();
+        sql.push_str(&format!(" {}", db_type.to_sql(&keys[i])));
+    }
+
+    // Remove trailing comma and add a parenthese
+    sql.pop();
+    sql.push(')');
+
+    connection.execute(&sql, ()).unwrap();
 }
 // Handle PUT Simply update entry
 
