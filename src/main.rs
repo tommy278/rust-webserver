@@ -1,7 +1,7 @@
 mod template;
 
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, params_from_iter};
+use rusqlite::{Connection, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufReader, prelude::*};
@@ -190,11 +190,50 @@ fn handle_connection(mut stream: TcpStream, connection: &Connection) {
 
             handle_post_request(&body, &mut stream, route, connection, content_type)
         }
-        _ => todo!(),
+        Method::PUT => handle_put_request(),
+        Method::DELETE => handle_delete_request(&mut stream, route, connection),
     }
 }
 
 // Handle POST CREATE ENTRY OR CREATE TABLE
+
+fn handle_put_request() {
+    todo!()
+}
+
+fn handle_delete_request(stream: &mut TcpStream, route: &str, connection: &Connection) {
+    let route = &route[1..];
+
+    let slice_idx = route.find("/").unwrap() as usize + 1;
+    let schema = &route[slice_idx..];
+
+    if route.ends_with("delete") {
+        let (schema, _) = schema.split_once('/').unwrap();
+        let sql = format!("DROP TABLE IF EXISTS {}", schema);
+        connection.execute(&sql, ()).unwrap();
+    } else {
+        let (schema, id) = schema.split_once('/').unwrap();
+        let sql = format!("DELETE FROM {} where id = ?1", schema);
+        connection.execute(&sql, params![id]).unwrap();
+    }
+
+    let response = Response {
+        status: 200,
+        message: String::from("Succesfully created"),
+    };
+
+    let res_json = serde_json::to_string(&response).unwrap();
+
+    let status_header = "HTTP/1.1 200 OK";
+    let content_type = "application/json";
+    let content_length = res_json.len();
+
+    let response = format!(
+        "{status_header}\r\nContent-Type: {content_type}\r\nContent-Length: {content_length}\r\n\r\n{res_json}"
+    );
+
+    stream.write_all(response.as_bytes()).unwrap();
+}
 
 #[derive(Serialize, Deserialize)]
 struct Response {
