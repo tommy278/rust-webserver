@@ -53,7 +53,7 @@ impl Method {
         match string {
             "POST" => Method::POST,
             "GET" => Method::GET,
-            "PUT" => Method::PUT,
+            "PUT" | "PATCH" => Method::PUT,
             "DELETE" => Method::DELETE,
             // TODO: Add better error handling
             _ => panic!("Method not found"),
@@ -190,15 +190,109 @@ fn handle_connection(mut stream: TcpStream, connection: &Connection) {
 
             handle_post_request(&body, &mut stream, route, connection, content_type)
         }
-        Method::PUT => handle_put_request(),
+        Method::PUT => {
+            let content_length = headers
+                .iter()
+                .find(|c| c.to_lowercase().starts_with("content-length:"))
+                .and_then(|c| c.split_once(':'))
+                .map(|(_, value)| value.trim().parse::<usize>().unwrap_or_default())
+                .unwrap();
+
+            let content_type = headers
+                .iter()
+                .find(|c| c.to_lowercase().starts_with("content-type:"))
+                .and_then(|c| c.split_once(':'))
+                .map(|(_, value)| value.trim())
+                .unwrap();
+
+            let content_type = Encoding::from(content_type);
+
+            let mut body_buffer = vec![0; content_length];
+            reader.read_exact(&mut body_buffer).unwrap();
+
+            let body: String = String::from_utf8(body_buffer).unwrap();
+            handle_put_request(&body, &mut stream, route, connection, content_type)
+        }
         Method::DELETE => handle_delete_request(&mut stream, route, connection),
     }
 }
 
 // Handle POST CREATE ENTRY OR CREATE TABLE
 
-fn handle_put_request() {
-    todo!()
+fn handle_put_request(
+    body: &str,
+    stream: &mut TcpStream,
+    route: &str,
+    connection: &Connection,
+    content_type: Encoding,
+) {
+    let route = &route[1..];
+
+    let slice_idx = route.find("/").unwrap() as usize + 1;
+    let schema = &route[slice_idx..];
+
+    let mut keys: Vec<String> = Vec::with_capacity(20);
+    let mut values: Vec<String> = Vec::with_capacity(20);
+
+    let (schema, id) = schema.split_once('/').unwrap();
+
+    match content_type {
+        Encoding::URL => {
+            let pairs: Vec<&str> = body.split('&').collect();
+            for p in pairs {
+                let pair = p.split_once('=').unwrap();
+                keys.push(String::from(pair.0));
+                values.push(String::from(pair.1));
+            }
+        }
+        Encoding::JSON => {
+            let body_json: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let obj = body_json.as_object().unwrap();
+            for (key, value) in obj {
+                keys.push(key.to_string());
+                values.push(value.to_string())
+            }
+        }
+    }
+
+    assert_eq!(
+        keys.len(),
+        values.len(),
+        "Something went wrong with parsing"
+    );
+
+    let mut sql = format!("UPDATE {} SET ", schema);
+
+    for (i, key) in keys.iter().enumerate() {
+        let field = format!("{} = {}", key, &format!("?{}", i + 1));
+        sql.push_str(&field);
+    }
+
+    // The id field will be the last item in the vec
+    // It is yet to be inserted, insertion occurs right after
+    let id_field = format!(" WHERE id = ?{}", values.len() + 1);
+    values.push(id.to_string());
+
+    sql.push_str(&id_field);
+
+    connection.execute(&sql, params_from_iter(values)).unwrap();
+
+    let response = Response {
+        status: 200,
+        message: String::from("Succesfully updated"),
+    };
+
+    let res_json = serde_json::to_string(&response).unwrap();
+
+    let status_header = "HTTP/1.1 200 OK";
+    let content_type = "application/json";
+    let content_length = res_json.len();
+
+    let response = format!(
+        "{status_header}\r\nContent-Type: {content_type}\r\nContent-Length: {content_length}\r\n\r\n{res_json}"
+    );
+
+    stream.write_all(response.as_bytes()).unwrap();
 }
 
 fn handle_delete_request(stream: &mut TcpStream, route: &str, connection: &Connection) {
@@ -213,13 +307,13 @@ fn handle_delete_request(stream: &mut TcpStream, route: &str, connection: &Conne
         connection.execute(&sql, ()).unwrap();
     } else {
         let (schema, id) = schema.split_once('/').unwrap();
-        let sql = format!("DELETE FROM {} where id = ?1", schema);
+        let sql = format!("DELETE FROM {} WHERE id = ?1", schema);
         connection.execute(&sql, params![id]).unwrap();
     }
 
     let response = Response {
         status: 200,
-        message: String::from("Succesfully created"),
+        message: String::from("Succesfully deleted"),
     };
 
     let res_json = serde_json::to_string(&response).unwrap();
