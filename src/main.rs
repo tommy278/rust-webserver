@@ -22,14 +22,21 @@ enum Type {
     INTEGER,
     TEXT,
     REAL,
+    BLOB,
+    NULL,
 }
 
 impl Type {
     fn to_sql(&self, key: &str) -> String {
+        format!("{} {},", key, self.as_str())
+    }
+    fn as_str(&self) -> &str {
         match self {
-            Type::INTEGER => format!("{} INTEGER NOT NULL,", key),
-            Type::REAL => format!("{} REAL NOT NULL,", key),
-            Type::TEXT => format!("{} TEXT NOT NULL,", key),
+            Type::INTEGER => "INTEGER",
+            Type::TEXT => "TEXT",
+            Type::REAL => "REAL",
+            Type::BLOB => "BLOB",
+            Type::NULL => "NULL",
         }
     }
 }
@@ -38,12 +45,14 @@ impl FromStr for Type {
     type Err = std::convert::Infallible;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.parse::<i64>().is_ok() {
-            Ok(Self::INTEGER)
-        } else if s.parse::<f64>().is_ok() {
-            Ok(Self::REAL)
-        } else {
-            Ok(Self::TEXT)
+        // Trim for literal quotes
+        match s.to_lowercase().trim_matches('"') {
+            "integer" => Ok(Self::INTEGER),
+            "text" => Ok(Self::TEXT),
+            "real" | "float" => Ok(Self::REAL),
+            "blob" => Ok(Type::BLOB),
+            "null" => Ok(Self::NULL),
+            _ => todo!(),
         }
     }
 }
@@ -301,6 +310,7 @@ fn handle_delete_request(stream: &mut TcpStream, route: &str, connection: &Conne
     let slice_idx = route.find("/").unwrap() as usize + 1;
     let schema = &route[slice_idx..];
 
+    // TODO:  Have table delete be the default when the request is sent with no params
     if route.ends_with("delete") {
         let (schema, _) = schema.split_once('/').unwrap();
         let sql = format!("DROP TABLE IF EXISTS {}", schema);
@@ -379,9 +389,6 @@ fn handle_post_request(
 
     if schema.ends_with("create") {
         handle_create(schema, &keys, &values, connection);
-
-        let (schema, _) = schema.split_once("/").unwrap();
-        handle_insert(schema, &keys, &values, connection);
     } else {
         handle_insert(schema, &keys, &values, connection);
     };
