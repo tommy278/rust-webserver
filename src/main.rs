@@ -470,7 +470,7 @@ fn handle_get_request(
     let is_safe = absolute_route.starts_with("static/")
         || absolute_route.starts_with("styles/")
         || absolute_route.starts_with("scripts/")
-        || absolute_route.starts_with("api/");
+        || absolute_route.starts_with("api");
 
     if !is_safe {
         let err = "HTTP/1.1 403 Forbidden\r\n\r\n";
@@ -481,6 +481,28 @@ fn handle_get_request(
     //  structure like api/* eg api/people or api/games
 
     if absolute_route.starts_with("api") {
+        if absolute_route == "api" || absolute_route == "api/" {
+            let mut stmt = connection.prepare(
+                "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%';
+",
+            ).unwrap();
+            let cols = stmt.query_map([], |row| row.get::<_, String>(0)).unwrap();
+
+            let table_names: Vec<String> = cols.filter_map(|c| c.ok()).collect();
+            let table_names_json = serde_json::to_string(&table_names).unwrap();
+
+            let status_header = "HTTP/1.1 200 OK";
+            let content_type = "application/json";
+            let content_length = table_names_json.len();
+
+            let response = format!(
+                "{status_header}\r\nContent-Type: {content_type}\r\nContent-Length: {content_length}\r\n\r\n{table_names_json}"
+            );
+
+            stream.write_all(response.as_bytes()).unwrap();
+            return;
+        }
+
         // Drop the first 4 chars ('api/')
         let schema_name = &absolute_route[4..];
 
