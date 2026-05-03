@@ -504,7 +504,13 @@ fn handle_get_request(
         }
 
         // Drop the first 4 chars ('api/')
-        let schema_name = &absolute_route[4..];
+        let mut schema_name = &absolute_route[4..];
+        let mut id: Option<&str> = None;
+
+        if let Some((tmp_schema_name, tmp_id)) = schema_name.split_once("/") {
+            id = Some(tmp_id);
+            schema_name = tmp_schema_name;
+        }
 
         let query = format!("PRAGMA table_info({})", schema_name);
         let mut stmt = connection.prepare(&query).unwrap();
@@ -515,11 +521,23 @@ fn handle_get_request(
             .filter_map(|r| r.ok())
             .collect();
 
-        let query = format!("SELECT * FROM {}", schema_name);
+        let query = if id.is_some() {
+            format!("SELECT * FROM {} WHERE id = ?1", schema_name)
+        } else {
+            format!("SELECT * FROM {}", schema_name)
+        };
+
         let mut stmt = connection.prepare(&query).unwrap();
 
+        let param = if id.is_some() {
+            // Id is guranteed to be valid
+            unsafe { params![id.unwrap_unchecked()] }
+        } else {
+            params![]
+        };
+
         let rows = stmt
-            .query_map([], |row| {
+            .query_map(param, |row| {
                 let mut obj = serde_json::Map::new();
                 for (i, col) in columns.iter().enumerate() {
                     let value = match row.get_ref(i).unwrap() {
