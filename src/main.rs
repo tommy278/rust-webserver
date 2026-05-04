@@ -358,8 +358,8 @@ fn handle_post_request(
     let slice_idx = route.find("/").unwrap() as usize + 1;
     let schema = &route[slice_idx..];
 
-    let mut keys: Vec<String> = Vec::with_capacity(20);
-    let mut values: Vec<String> = Vec::with_capacity(20);
+    let mut keys: Vec<String> = Vec::new();
+    let mut values: Vec<String> = Vec::new();
 
     match content_type {
         Encoding::URL => {
@@ -415,7 +415,6 @@ fn handle_insert(schema: &str, keys: &Vec<String>, values: &Vec<String>, connect
     let value_query = keys.join(",");
     let place_holder: Vec<String> = (1..=keys.len()).map(|i| format!("?{}", i)).collect();
 
-    // let values: Vec<&dyn ToSql> = values.iter().map(|v| v as &dyn ToSql).collect();
     let sql = format!(
         "INSERT INTO {} ({}) VALUES ({})",
         schema,
