@@ -18,6 +18,18 @@ enum Method {
     DELETE,
 }
 
+impl Method {
+    fn new(string: &str) -> Self {
+        match string {
+            "POST" => Method::POST,
+            "GET" => Method::GET,
+            "PUT" | "PATCH" => Method::PUT,
+            "DELETE" => Method::DELETE,
+            _ => panic!("Method not found"),
+        }
+    }
+}
+
 enum Type {
     INTEGER,
     TEXT,
@@ -53,19 +65,6 @@ impl FromStr for Type {
             "blob" => Ok(Type::BLOB),
             "null" => Ok(Self::NULL),
             _ => todo!(),
-        }
-    }
-}
-
-impl Method {
-    fn new(string: &str) -> Self {
-        match string {
-            "POST" => Method::POST,
-            "GET" => Method::GET,
-            "PUT" | "PATCH" => Method::PUT,
-            "DELETE" => Method::DELETE,
-            // TODO: Add better error handling
-            _ => panic!("Method not found"),
         }
     }
 }
@@ -310,7 +309,6 @@ fn handle_delete_request(stream: &mut TcpStream, route: &str, connection: &Conne
     let slice_idx = route.find("/").unwrap() as usize + 1;
     let schema = &route[slice_idx..];
 
-    // TODO:  Have table delete be the default when the request is sent with no params
     if route.ends_with("delete") {
         let (schema, _) = schema.split_once('/').unwrap();
         let sql = format!("DROP TABLE IF EXISTS {}", schema);
