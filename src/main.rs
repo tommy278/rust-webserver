@@ -11,6 +11,49 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, mpsc::channel};
 use std::thread;
 
+#[derive(Serialize, Deserialize)]
+struct Response {
+    status: Status,
+    message: String,
+}
+
+#[derive(Serialize, Deserialize)]
+enum Status {
+    Ok = 200,
+    Created = 201,
+    BadRequest = 400,
+    Forbidden = 403,
+    NotFound = 404,
+    InternalServerError = 500,
+}
+
+impl Status {
+    fn status_header(&self) -> &str {
+        match self {
+            Status::Ok => "HTTP/1.1 200 OK",
+            Status::Created => "HTTP/1.1 201 Created",
+            Status::BadRequest => "HTTP/1.1 400 BadRequest",
+            Status::Forbidden => "HTTP/1.1 403 Forbidden",
+            Status::NotFound => "HTTP/1.1 404 NotFound",
+            Status::InternalServerError => "HTTP/1.1 500 InternalServerError",
+        }
+    }
+}
+
+impl Response {
+    fn send_response(&self, stream: &mut TcpStream, content: &str, content_type: DocType) {
+        let status_header = self.status.status_header();
+        let content_length = content.len();
+        let content_type = content_type.to_string();
+
+        let response = format!(
+            "{status_header}\r\nContent-Type: {content_type}\r\nContent-Length: {content_length}\r\n\r\n{content}"
+        );
+
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+}
+
 enum Method {
     POST,
     GET,
@@ -112,6 +155,16 @@ impl DocType {
             return DocType::OTHER;
         }
     }
+
+    fn to_string(&self) -> &str {
+        match self {
+            DocType::CSS => "text/css",
+            DocType::HTML => "text/html",
+            DocType::JS => "text/javascript",
+            DocType::OTHER => "application/octet-stream",
+            DocType::API => "application/json",
+        }
+    }
 }
 
 enum Encoding {
@@ -135,7 +188,7 @@ struct ThreadData {
 }
 
 fn main() {
-    let listener = TcpListener::bind("127.0.0.1:8080").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:8080").expect("Failed to bind to port");
     let (tx, rx) = channel::<ThreadData>();
     let reciever = Arc::new(Mutex::new(rx));
 
@@ -166,7 +219,7 @@ fn handle_connection(mut stream: TcpStream, connection: &Connection) {
         .take_while(|l| !l.is_empty())
         .collect();
 
-    let request_header = headers.iter().nth(0).unwrap();
+    let request_header = headers.first().unwrap();
 
     let HeaderDetails { route, method } = HeaderDetails::get_header_details(request_header);
 
@@ -175,50 +228,11 @@ fn handle_connection(mut stream: TcpStream, connection: &Connection) {
     match method {
         Method::GET => handle_get_request(&mut stream, route, doc_type, connection),
         Method::POST => {
-            let content_length = headers
-                .iter()
-                .find(|c| c.to_lowercase().starts_with("content-length:"))
-                .and_then(|c| c.split_once(':'))
-                .map(|(_, value)| value.trim().parse::<usize>().unwrap_or_default())
-                .unwrap();
-
-            let content_type = headers
-                .iter()
-                .find(|c| c.to_lowercase().starts_with("content-type:"))
-                .and_then(|c| c.split_once(':'))
-                .map(|(_, value)| value.trim())
-                .unwrap();
-
-            let content_type = Encoding::from(content_type);
-
-            let mut body_buffer = vec![0; content_length];
-            reader.read_exact(&mut body_buffer).unwrap();
-
-            let body: String = String::from_utf8(body_buffer).unwrap();
-
+            let (body, content_type) = parse_body(&headers, &mut reader);
             handle_post_request(&body, &mut stream, route, connection, content_type)
         }
         Method::PUT => {
-            let content_length = headers
-                .iter()
-                .find(|c| c.to_lowercase().starts_with("content-length:"))
-                .and_then(|c| c.split_once(':'))
-                .map(|(_, value)| value.trim().parse::<usize>().unwrap_or_default())
-                .unwrap();
-
-            let content_type = headers
-                .iter()
-                .find(|c| c.to_lowercase().starts_with("content-type:"))
-                .and_then(|c| c.split_once(':'))
-                .map(|(_, value)| value.trim())
-                .unwrap();
-
-            let content_type = Encoding::from(content_type);
-
-            let mut body_buffer = vec![0; content_length];
-            reader.read_exact(&mut body_buffer).unwrap();
-
-            let body: String = String::from_utf8(body_buffer).unwrap();
+            let (body, content_type) = parse_body(&headers, &mut reader);
             handle_put_request(&body, &mut stream, route, connection, content_type)
         }
         Method::DELETE => handle_delete_request(&mut stream, route, connection),
@@ -286,21 +300,12 @@ fn handle_put_request(
     connection.execute(&sql, params_from_iter(values)).unwrap();
 
     let response = Response {
-        status: 200,
+        status: Status::Ok,
         message: String::from("Succesfully updated"),
     };
 
     let res_json = serde_json::to_string(&response).unwrap();
-
-    let status_header = "HTTP/1.1 200 OK";
-    let content_type = "application/json";
-    let content_length = res_json.len();
-
-    let response = format!(
-        "{status_header}\r\nContent-Type: {content_type}\r\nContent-Length: {content_length}\r\n\r\n{res_json}"
-    );
-
-    stream.write_all(response.as_bytes()).unwrap();
+    response.send_response(stream, &res_json, DocType::API);
 }
 
 fn handle_delete_request(stream: &mut TcpStream, route: &str, connection: &Connection) {
@@ -320,27 +325,12 @@ fn handle_delete_request(stream: &mut TcpStream, route: &str, connection: &Conne
     }
 
     let response = Response {
-        status: 200,
+        status: Status::Ok,
         message: String::from("Succesfully deleted"),
     };
 
     let res_json = serde_json::to_string(&response).unwrap();
-
-    let status_header = "HTTP/1.1 200 OK";
-    let content_type = "application/json";
-    let content_length = res_json.len();
-
-    let response = format!(
-        "{status_header}\r\nContent-Type: {content_type}\r\nContent-Length: {content_length}\r\n\r\n{res_json}"
-    );
-
-    stream.write_all(response.as_bytes()).unwrap();
-}
-
-#[derive(Serialize, Deserialize)]
-struct Response {
-    status: u8,
-    message: String,
+    response.send_response(stream, &res_json, DocType::API);
 }
 
 fn handle_post_request(
@@ -392,21 +382,12 @@ fn handle_post_request(
     };
 
     let response = Response {
-        status: 200,
+        status: Status::Ok,
         message: String::from("Succesfully created"),
     };
 
     let res_json = serde_json::to_string(&response).unwrap();
-
-    let status_header = "HTTP/1.1 200 OK";
-    let content_type = "application/json";
-    let content_length = res_json.len();
-
-    let response = format!(
-        "{status_header}\r\nContent-Type: {content_type}\r\nContent-Length: {content_length}\r\n\r\n{res_json}"
-    );
-
-    stream.write_all(response.as_bytes()).unwrap();
+    response.send_response(stream, &res_json, DocType::API);
 }
 
 fn handle_insert(schema: &str, keys: &Vec<String>, values: &Vec<String>, connection: &Connection) {
@@ -488,15 +469,11 @@ fn handle_get_request(
             let table_names: Vec<String> = cols.filter_map(|c| c.ok()).collect();
             let table_names_json = serde_json::to_string(&table_names).unwrap();
 
-            let status_header = "HTTP/1.1 200 OK";
-            let content_type = "application/json";
-            let content_length = table_names_json.len();
-
-            let response = format!(
-                "{status_header}\r\nContent-Type: {content_type}\r\nContent-Length: {content_length}\r\n\r\n{table_names_json}"
-            );
-
-            stream.write_all(response.as_bytes()).unwrap();
+            let response = Response {
+                status: Status::Ok,
+                message: String::from("Succesfully recieved"),
+            };
+            response.send_response(stream, &table_names_json, DocType::API);
             return;
         }
 
@@ -556,15 +533,11 @@ fn handle_get_request(
 
         let rows_json = serde_json::json!(rows).to_string();
 
-        let status_header = "HTTP/1.1 200 OK";
-        let content_type = "application/json";
-        let content_length = rows_json.len();
-
-        let response = format!(
-            "{status_header}\r\nContent-Type: {content_type}\r\nContent-Length: {content_length}\r\n\r\n{rows_json}"
-        );
-
-        stream.write_all(response.as_bytes()).unwrap();
+        let response = Response {
+            status: Status::Ok,
+            message: String::from("Succesfully recieved"),
+        };
+        response.send_response(stream, &rows_json, DocType::API);
         return;
     }
 
@@ -572,13 +545,7 @@ fn handle_get_request(
     let status_header: &str;
     let length: usize;
 
-    let content_type = match doc_type {
-        DocType::CSS => "text/css",
-        DocType::HTML => "text/html",
-        DocType::JS => "text/javascript",
-        DocType::OTHER => "application/octet-stream",
-        DocType::API => unreachable!(),
-    };
+    let content_type = doc_type.to_string();
 
     if let Ok(mut file) = File::open(absolute_route) {
         file.read_to_string(&mut buf).unwrap();
@@ -596,4 +563,29 @@ fn handle_get_request(
     );
 
     stream.write_all(response.as_bytes()).unwrap();
+}
+
+fn parse_body(headers: &[String], reader: &mut BufReader<&TcpStream>) -> (String, Encoding) {
+    let content_length = headers
+        .iter()
+        .find(|c| c.to_lowercase().starts_with("content-length:"))
+        .and_then(|c| c.split_once(':'))
+        .map(|(_, value)| value.trim().parse::<usize>().unwrap_or_default())
+        .unwrap();
+
+    let content_type = headers
+        .iter()
+        .find(|c| c.to_lowercase().starts_with("content-type:"))
+        .and_then(|c| c.split_once(':'))
+        .map(|(_, value)| value.trim())
+        .unwrap();
+
+    let content_type = Encoding::from(content_type);
+
+    let mut body_buffer = vec![0; content_length];
+    reader.read_exact(&mut body_buffer).unwrap();
+
+    let body: String = String::from_utf8(body_buffer).unwrap();
+
+    (body, Encoding::from(content_type))
 }
