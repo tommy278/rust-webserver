@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io::{BufReader, prelude::*};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
+use std::result::Result;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, mpsc::channel};
 use std::thread;
@@ -187,7 +188,52 @@ struct ThreadData {
     connection: Connection,
 }
 
-fn main() {
+#[derive(Debug)]
+enum ServerError {
+    DbError(rusqlite::Error),
+    ParseError(String),
+    IoError(std::io::Error),
+    JsonError(serde_json::Error),
+}
+
+impl std::fmt::Display for ServerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServerError::DbError(e) => write!(f, "DB error: {e}"),
+            ServerError::ParseError(e) => write!(f, "Parse Error: {e}"),
+            ServerError::IoError(e) => write!(f, "I/O Error: {e}"),
+            ServerError::JsonError(e) => write!(f, "Json Error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ServerError {}
+
+impl From<rusqlite::Error> for ServerError {
+    fn from(e: rusqlite::Error) -> Self {
+        ServerError::DbError(e)
+    }
+}
+
+impl From<std::io::Error> for ServerError {
+    fn from(e: std::io::Error) -> Self {
+        ServerError::IoError(e)
+    }
+}
+
+impl From<String> for ServerError {
+    fn from(e: String) -> Self {
+        ServerError::ParseError(e)
+    }
+}
+
+impl From<serde_json::Error> for ServerError {
+    fn from(e: serde_json::Error) -> Self {
+        ServerError::JsonError(e)
+    }
+}
+
+fn main() -> Result<(), ServerError> {
     let listener = TcpListener::bind("127.0.0.1:8080").expect("Failed to bind to port");
     let (tx, rx) = channel::<ThreadData>();
     let reciever = Arc::new(Mutex::new(rx));
@@ -208,9 +254,20 @@ fn main() {
         let connection = Connection::open(path).unwrap();
         tx.send(ThreadData { stream, connection }).unwrap();
     }
+
+    Ok(())
 }
 
-fn handle_connection(mut stream: TcpStream, connection: &Connection) {
+fn handle_connection(stream: TcpStream, connection: &Connection) {
+    if let Err(e) = try_handle_connection(stream, connection) {
+        eprintln!("{e}");
+    }
+}
+
+fn try_handle_connection(
+    mut stream: TcpStream,
+    connection: &Connection,
+) -> Result<(), ServerError> {
     let mut reader = BufReader::new(&stream);
 
     let lines = (&mut reader).lines();
@@ -219,24 +276,28 @@ fn handle_connection(mut stream: TcpStream, connection: &Connection) {
         .take_while(|l| !l.is_empty())
         .collect();
 
-    let request_header = headers.first().unwrap();
+    let request_header = headers.first().ok_or(ServerError::ParseError(
+        "Could not find request header".to_string(),
+    ))?;
 
     let HeaderDetails { route, method } = HeaderDetails::get_header_details(request_header);
 
     let doc_type = DocType::parse_ext(&route);
 
     match method {
-        Method::GET => handle_get_request(&mut stream, route, doc_type, connection),
+        Method::GET => handle_get_request(&mut stream, route, doc_type, connection)?,
         Method::POST => {
-            let (body, content_type) = parse_body(&headers, &mut reader);
-            handle_post_request(&body, &mut stream, route, connection, content_type)
+            let (body, content_type) = parse_body(&headers, &mut reader)?;
+            handle_post_request(&body, &mut stream, route, connection, content_type)?
         }
         Method::PUT => {
-            let (body, content_type) = parse_body(&headers, &mut reader);
-            handle_put_request(&body, &mut stream, route, connection, content_type)
+            let (body, content_type) = parse_body(&headers, &mut reader)?;
+            handle_put_request(&body, &mut stream, route, connection, content_type)?
         }
-        Method::DELETE => handle_delete_request(&mut stream, route, connection),
-    }
+        Method::DELETE => handle_delete_request(&mut stream, route, connection)?,
+    };
+
+    Ok(())
 }
 
 // Handle POST CREATE ENTRY OR CREATE TABLE
@@ -247,28 +308,28 @@ fn handle_put_request(
     route: &str,
     connection: &Connection,
     content_type: Encoding,
-) {
+) -> Result<(), ServerError> {
     let route = &route[1..];
 
-    let slice_idx = route.find("/").unwrap() as usize + 1;
+    let slice_idx = find_by_pat(route, '/')? + 1;
     let schema = &route[slice_idx..];
 
-    let mut keys: Vec<String> = Vec::with_capacity(20);
-    let mut values: Vec<String> = Vec::with_capacity(20);
+    let mut keys: Vec<String> = Vec::new();
+    let mut values: Vec<String> = Vec::new();
 
-    let (schema, id) = schema.split_once('/').unwrap();
+    let (schema, id) = split_by_delimeter(schema, '/')?;
 
     match content_type {
         Encoding::URL => {
             let pairs: Vec<&str> = body.split('&').collect();
             for p in pairs {
-                let pair = p.split_once('=').unwrap();
+                let pair = split_by_delimeter(p, '=')?;
                 keys.push(String::from(pair.0));
                 values.push(String::from(pair.1));
             }
         }
         Encoding::JSON => {
-            let body_json: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let body_json: serde_json::Value = serde_json::from_str(&body)?;
             let obj = body_json.as_object().unwrap();
             for (key, value) in obj {
                 keys.push(key.to_string());
@@ -297,31 +358,37 @@ fn handle_put_request(
 
     sql.push_str(&id_field);
 
-    connection.execute(&sql, params_from_iter(values)).unwrap();
+    connection.execute(&sql, params_from_iter(values))?;
 
     let response = Response {
         status: Status::Ok,
         message: String::from("Succesfully updated"),
     };
 
-    let res_json = serde_json::to_string(&response).unwrap();
+    let res_json = serde_json::to_string(&response)?;
     response.send_response(stream, &res_json, DocType::API);
+
+    Ok(())
 }
 
-fn handle_delete_request(stream: &mut TcpStream, route: &str, connection: &Connection) {
+fn handle_delete_request(
+    stream: &mut TcpStream,
+    route: &str,
+    connection: &Connection,
+) -> Result<(), ServerError> {
     let route = &route[1..];
 
-    let slice_idx = route.find("/").unwrap() as usize + 1;
+    let slice_idx = find_by_pat(route, '/')? + 1;
     let schema = &route[slice_idx..];
 
     if route.ends_with("delete") {
-        let (schema, _) = schema.split_once('/').unwrap();
+        let (schema, _) = split_by_delimeter(schema, '/')?;
         let sql = format!("DROP TABLE IF EXISTS {}", schema);
-        connection.execute(&sql, ()).unwrap();
+        connection.execute(&sql, ())?;
     } else {
-        let (schema, id) = schema.split_once('/').unwrap();
+        let (schema, id) = split_by_delimeter(schema, '/')?;
         let sql = format!("DELETE FROM {} WHERE id = ?1", schema);
-        connection.execute(&sql, params![id]).unwrap();
+        connection.execute(&sql, params![id])?;
     }
 
     let response = Response {
@@ -329,8 +396,9 @@ fn handle_delete_request(stream: &mut TcpStream, route: &str, connection: &Conne
         message: String::from("Succesfully deleted"),
     };
 
-    let res_json = serde_json::to_string(&response).unwrap();
+    let res_json = serde_json::to_string(&response)?;
     response.send_response(stream, &res_json, DocType::API);
+    Ok(())
 }
 
 fn handle_post_request(
@@ -339,11 +407,11 @@ fn handle_post_request(
     route: &str,
     connection: &Connection,
     content_type: Encoding,
-) {
+) -> Result<(), ServerError> {
     // Remove the beginning char which is / to make the slice idx find accurate
     let route = &route[1..];
 
-    let slice_idx = route.find("/").unwrap() as usize + 1;
+    let slice_idx = find_by_pat(route, '/')? + 1;
     let schema = &route[slice_idx..];
 
     let mut keys: Vec<String> = Vec::new();
@@ -353,13 +421,13 @@ fn handle_post_request(
         Encoding::URL => {
             let pairs: Vec<&str> = body.split('&').collect();
             for p in pairs {
-                let pair = p.split_once('=').unwrap();
+                let pair = split_by_delimeter(p, '=')?;
                 keys.push(String::from(pair.0));
                 values.push(String::from(pair.1));
             }
         }
         Encoding::JSON => {
-            let body_json: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let body_json: serde_json::Value = serde_json::from_str(&body)?;
             let obj = body_json.as_object().unwrap();
             for (key, value) in obj {
                 keys.push(key.to_string());
@@ -376,9 +444,9 @@ fn handle_post_request(
     // Something like game_id, game_title, ...
 
     if schema.ends_with("create") {
-        handle_create(schema, &keys, &values, connection);
+        handle_create(schema, &keys, &values, connection)?;
     } else {
-        handle_insert(schema, &keys, &values, connection);
+        handle_insert(schema, &keys, &values, connection)?;
     };
 
     let response = Response {
@@ -386,11 +454,18 @@ fn handle_post_request(
         message: String::from("Succesfully created"),
     };
 
-    let res_json = serde_json::to_string(&response).unwrap();
+    let res_json = serde_json::to_string(&response)?;
     response.send_response(stream, &res_json, DocType::API);
+
+    Ok(())
 }
 
-fn handle_insert(schema: &str, keys: &Vec<String>, values: &Vec<String>, connection: &Connection) {
+fn handle_insert(
+    schema: &str,
+    keys: &Vec<String>,
+    values: &Vec<String>,
+    connection: &Connection,
+) -> Result<(), ServerError> {
     let value_query = keys.join(",");
     let place_holder: Vec<String> = (1..=keys.len()).map(|i| format!("?{}", i)).collect();
 
@@ -401,11 +476,17 @@ fn handle_insert(schema: &str, keys: &Vec<String>, values: &Vec<String>, connect
         place_holder.join(",")
     );
 
-    connection.execute(&sql, params_from_iter(values)).unwrap();
+    connection.execute(&sql, params_from_iter(values))?;
+    Ok(())
 }
 
-fn handle_create(schema: &str, keys: &Vec<String>, values: &Vec<String>, connection: &Connection) {
-    let (schema, _) = schema.split_once("/").unwrap();
+fn handle_create(
+    schema: &str,
+    keys: &Vec<String>,
+    values: &Vec<String>,
+    connection: &Connection,
+) -> Result<(), ServerError> {
+    let (schema, _) = split_by_delimeter(schema, '/')?;
 
     let mut sql = format!(
         "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY,",
@@ -421,7 +502,8 @@ fn handle_create(schema: &str, keys: &Vec<String>, values: &Vec<String>, connect
     sql.pop();
     sql.push(')');
 
-    connection.execute(&sql, ()).unwrap();
+    connection.execute(&sql, ())?;
+    Ok(())
 }
 // Handle PUT Simply update entry
 
@@ -432,7 +514,7 @@ fn handle_get_request(
     route: &str,
     doc_type: DocType,
     connection: &Connection,
-) {
+) -> Result<(), ServerError> {
     let absolute_route = match route {
         "/" => "static/index.html".to_string(),
         _ => {
@@ -453,7 +535,7 @@ fn handle_get_request(
     if !is_safe {
         let err = "HTTP/1.1 403 Forbidden\r\n\r\n";
         stream.write_all(err.as_bytes()).unwrap();
-        return;
+        return Ok(());
     }
 
     //  structure like api/* eg api/people or api/games
@@ -463,18 +545,19 @@ fn handle_get_request(
             let mut stmt = connection.prepare(
                 "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%';
 ",
-            ).unwrap();
-            let cols = stmt.query_map([], |row| row.get::<_, String>(0)).unwrap();
+            )?;
+            let cols = stmt.query_map([], |row| row.get::<_, String>(0))?;
 
             let table_names: Vec<String> = cols.filter_map(|c| c.ok()).collect();
-            let table_names_json = serde_json::to_string(&table_names).unwrap();
+            let table_names_json = serde_json::to_string(&table_names)?;
 
             let response = Response {
                 status: Status::Ok,
                 message: String::from("Succesfully recieved"),
             };
             response.send_response(stream, &table_names_json, DocType::API);
-            return;
+
+            return Ok(());
         }
 
         // Drop the first 4 chars ('api/')
@@ -487,11 +570,10 @@ fn handle_get_request(
         }
 
         let query = format!("PRAGMA table_info({})", schema_name);
-        let mut stmt = connection.prepare(&query).unwrap();
+        let mut stmt = connection.prepare(&query)?;
 
         let columns: Vec<String> = stmt
-            .query_map([], |row| row.get(1))
-            .unwrap()
+            .query_map([], |row| row.get(1))?
             .filter_map(|r| r.ok())
             .collect();
 
@@ -501,7 +583,7 @@ fn handle_get_request(
             format!("SELECT * FROM {}", schema_name)
         };
 
-        let mut stmt = connection.prepare(&query).unwrap();
+        let mut stmt = connection.prepare(&query)?;
 
         let param = if id.is_some() {
             // Id is guranteed to be valid
@@ -526,8 +608,7 @@ fn handle_get_request(
                     obj.insert(col.clone(), value);
                 }
                 Ok(serde_json::Value::Object(obj))
-            })
-            .unwrap()
+            })?
             .filter_map(|r| r.ok())
             .collect::<Vec<_>>();
 
@@ -538,7 +619,8 @@ fn handle_get_request(
             message: String::from("Succesfully recieved"),
         };
         response.send_response(stream, &rows_json, DocType::API);
-        return;
+
+        return Ok(());
     }
 
     let mut buf = String::new();
@@ -548,12 +630,12 @@ fn handle_get_request(
     let content_type = doc_type.to_string();
 
     if let Ok(mut file) = File::open(absolute_route) {
-        file.read_to_string(&mut buf).unwrap();
+        file.read_to_string(&mut buf)?;
         length = buf.len();
         status_header = "HTTP/1.1 200 OK";
     } else {
-        let mut file = File::open("static/not-found.html").unwrap();
-        file.read_to_string(&mut buf).unwrap();
+        let mut file = File::open("static/not-found.html")?;
+        file.read_to_string(&mut buf)?;
         length = buf.len();
         status_header = "HTTP/1.1 404 Not Found";
     }
@@ -563,29 +645,53 @@ fn handle_get_request(
     );
 
     stream.write_all(response.as_bytes()).unwrap();
+    Ok(())
 }
 
-fn parse_body(headers: &[String], reader: &mut BufReader<&TcpStream>) -> (String, Encoding) {
+fn parse_body(
+    headers: &[String],
+    reader: &mut BufReader<&TcpStream>,
+) -> Result<(String, Encoding), ServerError> {
     let content_length = headers
         .iter()
         .find(|c| c.to_lowercase().starts_with("content-length:"))
         .and_then(|c| c.split_once(':'))
         .map(|(_, value)| value.trim().parse::<usize>().unwrap_or_default())
-        .unwrap();
-
+        .ok_or(ServerError::ParseError(
+            "Could not find content length".to_string(),
+        ))?;
     let content_type = headers
         .iter()
         .find(|c| c.to_lowercase().starts_with("content-type:"))
         .and_then(|c| c.split_once(':'))
         .map(|(_, value)| value.trim())
-        .unwrap();
+        .ok_or(ServerError::ParseError(
+            "Could not find content type".to_string(),
+        ))?;
 
     let content_type = Encoding::from(content_type);
 
     let mut body_buffer = vec![0; content_length];
-    reader.read_exact(&mut body_buffer).unwrap();
+    reader.read_exact(&mut body_buffer)?;
 
-    let body: String = String::from_utf8(body_buffer).unwrap();
+    let body: String = String::from_utf8(body_buffer)
+        .map_err(|_| ServerError::ParseError("Could not convert body".to_string()))?;
 
-    (body, Encoding::from(content_type))
+    Ok((body, Encoding::from(content_type)))
+}
+
+fn split_by_delimeter(string: &str, delimiter: char) -> Result<(&str, &str), ServerError> {
+    let (first, second) = string
+        .split_once(delimiter)
+        .ok_or(ServerError::ParseError(format!(
+            "Could not split by delimeter: {delimiter}"
+        )))?;
+    Ok((first, second))
+}
+
+fn find_by_pat(string: &str, pat: char) -> Result<usize, ServerError> {
+    let idx = string.find(pat).ok_or(ServerError::ParseError(format!(
+        "Could not find by pat: {pat}"
+    )))?;
+    Ok(idx)
 }
