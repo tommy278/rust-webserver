@@ -1,3 +1,4 @@
+use crate::error::server_error::ServerError;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -90,8 +91,7 @@ impl Type {
 }
 
 impl FromStr for Type {
-    type Err = std::convert::Infallible;
-
+    type Err = ServerError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         // Trim for literal quotes
         match s.to_lowercase().trim_matches('"') {
@@ -100,7 +100,7 @@ impl FromStr for Type {
             "real" | "float" => Ok(Self::REAL),
             "blob" => Ok(Type::BLOB),
             "null" => Ok(Self::NULL),
-            _ => todo!(),
+            _ => Err(ServerError::ParseError("Type does not exist".to_string())),
         }
     }
 }

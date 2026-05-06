@@ -1,4 +1,4 @@
-use crate::error::ServerError;
+use crate::error::server_error::ServerError;
 use crate::interface::{
     DocType, Encoding, HeaderDetails, Method, Response, Status, ThreadData, Type,
 };
@@ -280,7 +280,7 @@ fn handle_create(
     );
 
     for i in 0..keys.len() {
-        let db_type = Type::from_str(&values[i]).unwrap();
+        let db_type = Type::from_str(&values[i])?;
         sql.push_str(&format!(" {}", db_type.to_sql(&keys[i])));
     }
 
