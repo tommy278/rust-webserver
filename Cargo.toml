@@ -11,3 +11,7 @@ serde_json = "1.0.149"
 [[bin]]
 name="rweb"
 path="src/bin/rweb.rs"
+
+[[bin]]
+name="load_balancer"
+path="src/bin/load_balancer.rs"
