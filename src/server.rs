@@ -22,7 +22,7 @@ macro_rules! ensure {
 }
 
 pub fn run(port: u16) {
-    let port = format!("127.0.0.1:{}", port);
+    let port = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&port).expect(&format!("Failed to bind to port: {}", port));
     let (tx, rx) = channel::<ThreadData>();
     let reciever = Arc::new(Mutex::new(rx));
