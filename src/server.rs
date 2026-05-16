@@ -28,7 +28,9 @@ pub fn run(port: u16) {
     let reciever = Arc::new(Mutex::new(rx));
 
     // Ensure root api directory exists
-    std::fs::create_dir("api").unwrap();
+    if !Path::new("api").exists() {
+        std::fs::create_dir("api").unwrap();
+    }
 
     for _ in 0..4 {
         let reciever = reciever.clone();
