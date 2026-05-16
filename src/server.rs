@@ -27,6 +27,9 @@ pub fn run(port: u16) {
     let (tx, rx) = channel::<ThreadData>();
     let reciever = Arc::new(Mutex::new(rx));
 
+    // Ensure root api directory exists
+    std::fs::create_dir("api").unwrap();
+
     for _ in 0..4 {
         let reciever = reciever.clone();
         thread::spawn(move || {
