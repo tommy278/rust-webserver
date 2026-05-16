@@ -25,7 +25,7 @@ fn main() {
         });
     }
 
-    let listener = TcpListener::bind("127.0.0.1:8080").expect("Failed to bind load balancer");
+    let listener = TcpListener::bind("0.0.0.0:8080").expect("Failed to bind load balancer");
     let (tx, rx) = channel::<TcpStream>();
     let reciever = Arc::new(Mutex::new(rx));
 
@@ -40,7 +40,7 @@ fn main() {
                 let current = port_num.fetch_add(1, Ordering::Relaxed);
                 let port = (current % MAX_PORT_NUM) + 8081;
 
-                forward(stream, &format!("127.0.0.1:{}", port));
+                forward(stream, &format!("0.0.0.0:{}", port));
             }
         });
     }
